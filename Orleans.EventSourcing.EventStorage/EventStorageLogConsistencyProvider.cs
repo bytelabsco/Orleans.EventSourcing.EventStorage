@@ -11,7 +11,7 @@
     /// <summary>
     /// A log-consistency provider that stores individual events and snapshots of those events, using any standard storage provider.
     /// </summary>
-    public class LogConsistencyProvider : ILogConsistencyProvider
+    public class EventStorageLogConsistencyProvider : ILogConsistencyProvider
     {
         private static int counter; // used for constructing a unique id
         private int id;
@@ -71,7 +71,7 @@
             where TLogView : class, new()
             where TLogEntry : class
         {
-            return new LogViewAdaptor<TLogView, TLogEntry>(hostGrain, initialState, storageProvider, grainTypeName, services, _grainFactory, _config);
+            return new EventStorageLogViewAdaptor<TLogView, TLogEntry>(hostGrain, initialState, storageProvider, grainTypeName, services, _grainFactory, _config);
         }
 
         /// <inheritdoc/>

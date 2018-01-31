@@ -21,12 +21,12 @@
     /// </summary>
     /// <typeparam name="TLogView">Type of log view</typeparam>
     /// <typeparam name="TLogEntry">Type of log entry</typeparam>
-    internal class LogViewAdaptor<TLogView, TLogEntry> : PrimaryBasedLogViewAdaptor<TLogView, TLogEntry, SubmissionEntry<TLogEntry>> where TLogView : class, new() where TLogEntry : class
+    internal class EventStorageLogViewAdaptor<TLogView, TLogEntry> : PrimaryBasedLogViewAdaptor<TLogView, TLogEntry, SubmissionEntry<TLogEntry>> where TLogView : class, new() where TLogEntry : class
     {
         /// <summary>
         /// Initialize a StorageProviderLogViewAdaptor class
         /// </summary>
-        public LogViewAdaptor(ILogViewAdaptorHost<TLogView, TLogEntry> host, TLogView initialState, IStorageProvider globalStorageProvider, string grainTypeName, ILogConsistencyProtocolServices services, IGrainFactory grainFactory, EventStorageOptions config)
+        public EventStorageLogViewAdaptor(ILogViewAdaptorHost<TLogView, TLogEntry> host, TLogView initialState, IStorageProvider globalStorageProvider, string grainTypeName, ILogConsistencyProtocolServices services, IGrainFactory grainFactory, EventStorageOptions config)
             : base(host, initialState, services)
         {
             _globalStorageProvider = globalStorageProvider;

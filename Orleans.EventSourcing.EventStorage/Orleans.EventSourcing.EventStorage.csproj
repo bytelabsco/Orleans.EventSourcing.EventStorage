@@ -7,6 +7,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Orleans.EventSourcing" Version="2.0.0-beta3" />
     <PackageReference Include="Microsoft.Orleans.OrleansCodeGenerator.Build" Version="2.0.0-beta3" />
+    <PackageReference Include="Microsoft.Orleans.OrleansRuntime" Version="2.0.0-beta3" />
   </ItemGroup>
 
 </Project>
