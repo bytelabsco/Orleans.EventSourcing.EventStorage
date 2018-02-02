@@ -4,6 +4,6 @@
     {
         public static string CommitVersionPrefix { get { return "+v"; } }
 
-        public static string GlobalCommitStreamName { get { return "globalstream"; } }
+        public static string GlobalCommitStreamName { get { return "GlobalStream"; } }
     }
 }

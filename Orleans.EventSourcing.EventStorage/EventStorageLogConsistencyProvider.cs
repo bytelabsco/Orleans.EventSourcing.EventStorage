@@ -71,7 +71,7 @@
             where TLogView : class, new()
             where TLogEntry : class
         {
-            return new EventStorageLogViewAdaptor<TLogView, TLogEntry>(hostGrain, initialState, storageProvider, grainTypeName, services, _grainFactory, _config);
+            return new LogViewAdaptor<TLogView, TLogEntry>(hostGrain, initialState, storageProvider, grainTypeName, services, _config);
         }
 
         /// <inheritdoc/>
