@@ -15,9 +15,12 @@
         private string _grainTypeName;
         private EventStorageOptions _config;
 
+        private Guid _id;
+
         // the confirmed view
         private TLogView _view;
         private int _confirmedVersion = 0;
+        private int _globalVersion = 0;
 
         /// <summary>
         /// Initialize a LogViewAdaptor class
@@ -28,6 +31,8 @@
             _globalStorageProvider = globalStorageProvider;
             _grainTypeName = grainTypeName;
             _config = config;
+
+            _id = new Guid();
         }
 
         protected override int GetConfirmedVersion()
@@ -136,8 +141,8 @@
             var globalWriteBit = globalSummary.StreamSummaryState.FlipBit(Services.MyClusterId);
             var streamWriteBit = streamSummary.StreamSummaryState.FlipBit(Services.MyClusterId);
 
-            var newGlobalVersion = globalSummary.StreamSummaryState.CommitNumber++;
-            var newStreamVersion = streamSummary.StreamSummaryState.CommitNumber++;
+            globalSummary.StreamSummaryState.CommitNumber++;
+            streamSummary.StreamSummaryState.CommitNumber++;
 
             var commit = new Commit<TLogEntry>();
             //var convertedEvents = events.Select(s => s as object).ToList();
@@ -145,23 +150,22 @@
             commit.CommitState = new CommitState<TLogEntry>()
             {
                 Events = events,
-                GlobalNumber = newGlobalVersion
+                GlobalNumber = globalSummary.StreamSummaryState.CommitNumber
             };
 
-            var commitDecoratedGrainReference = new CustomIdGrainReferenceDecorator(grainReference, newGlobalVersion.ToString());
+            var commitDecoratedGrainReference = new CustomIdGrainReferenceDecorator(grainReference, globalSummary.StreamSummaryState.CommitNumber.ToString());
             await _globalStorageProvider.WriteStateAsync(nameof(Commit<TLogEntry>), commitDecoratedGrainReference, commit);
-
 
             
             var grainCommit = new StreamCommit();
 
             grainCommit.StreamCommitState = new StreamCommitState()
             {
-                GlobalNumber = newGlobalVersion,
-                Number = newStreamVersion
+                GlobalNumber = globalSummary.StreamSummaryState.CommitNumber,
+                Number = streamSummary.StreamSummaryState.CommitNumber
             };
 
-            var grainCommitDecoreatedGrainReference = new CustomIdGrainReferenceDecorator(grainReference, $"{baseId}{EventStorageConstants.CommitVersionPrefix}{newStreamVersion}");
+            var grainCommitDecoreatedGrainReference = new CustomIdGrainReferenceDecorator(grainReference, $"{baseId}{EventStorageConstants.CommitVersionPrefix}{streamSummary.StreamSummaryState.CommitNumber}");
             await _globalStorageProvider.WriteStateAsync(nameof(StreamCommit), grainCommitDecoreatedGrainReference, grainCommit);
 
             foreach (var @event in events)
@@ -169,7 +173,7 @@
                 ApplyEventToView(@event);
             }
 
-            _confirmedVersion = (int)newStreamVersion;
+            _confirmedVersion = (int)streamSummary.StreamSummaryState.CommitNumber;
 
             if (_config.TakeSnapshots)
             {
@@ -187,6 +191,12 @@
                     await _globalStorageProvider.WriteStateAsync(nameof(StreamSnapshot<TLogView>), grainReference, snapshot);
                 }
             }
+
+
+            // Update the summaries
+            await _globalStorageProvider.WriteStateAsync(nameof(StreamSummary), decoratedGlobalSummaryGrainReference, globalSummary);
+            await _globalStorageProvider.WriteStateAsync(nameof(StreamSummary), grainReference, streamSummary);
+
 
             batchsuccessfullywritten = true;
 

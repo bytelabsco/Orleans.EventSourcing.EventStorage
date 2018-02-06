@@ -6,6 +6,8 @@
     {
         private string _id;
 
+        public Orleans.Runtime.UniqueKey GrainId { get; set; }
+
         public CustomIdGrainReferenceDecorator(GrainReference other, string id): base(other)
         {
             _id = id;

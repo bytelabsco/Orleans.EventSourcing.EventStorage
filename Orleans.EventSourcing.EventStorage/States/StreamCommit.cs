@@ -35,8 +35,8 @@
 
         public StreamCommitState()
         {
-            Number = -1;
-            GlobalNumber = -1;
+            Number = 0;
+            GlobalNumber = 0;
         }
     }
 }

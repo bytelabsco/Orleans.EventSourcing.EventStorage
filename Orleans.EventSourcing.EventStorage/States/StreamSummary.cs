@@ -36,7 +36,7 @@
 
         public StreamSummaryState()
         {
-            CommitNumber = -1;
+            CommitNumber = 0;
             WriteVector = "";
         }
         public bool GetBit(string replica)

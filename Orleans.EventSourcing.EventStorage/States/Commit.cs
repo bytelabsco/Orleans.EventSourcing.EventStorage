@@ -37,7 +37,7 @@
         public CommitState()
         {
             Events = new List<TEntry>();
-            GlobalNumber = -1;
+            GlobalNumber = 0;
         }
     }
 }
