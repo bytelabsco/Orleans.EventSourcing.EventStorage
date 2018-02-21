@@ -1,16 +1,15 @@
 ﻿namespace Orleans.EventSourcing.EventStorage
 {
+    using System;
     using System.Collections.Generic;
+    using System.Threading.Tasks;
 
     public class EventStorageOptions
     {
         public bool TakeSnapshots { get; set; } = true;
         public int CommitsPerSnapshot { get; set; } = 100;
 
-        public bool StreamCommits { get; set; } = false;
-        public string StreamProvider { get; set; }
-        public string StreamName { get; set; }
-
+        public Func<object, Task> PostCommit;
 
         internal IDictionary<string, string> AsDictionary()
         {
@@ -18,10 +17,6 @@
 
             dictionary.Add(nameof(TakeSnapshots), TakeSnapshots.ToString());
             dictionary.Add(nameof(CommitsPerSnapshot), CommitsPerSnapshot.ToString());
-
-            dictionary.Add(nameof(StreamCommits), StreamCommits.ToString());
-            dictionary.Add(nameof(StreamProvider), StreamProvider ?? string.Empty);
-            dictionary.Add(nameof(StreamName), StreamName ?? string.Empty);
 
             return dictionary;
         }
@@ -48,21 +43,6 @@
                         {
                             options.CommitsPerSnapshot = commitsPerSnapshot;
                         }
-                        break;
-
-                    case nameof(StreamCommits):
-                        if (bool.TryParse(value, out bool streamCommits))
-                        {
-                            options.StreamCommits = streamCommits;
-                        }
-                        break;
-
-                    case nameof(StreamProvider):
-                        options.StreamProvider = value;
-                        break;
-
-                    case nameof(StreamName):
-                        options.StreamName = value;
                         break;
                 }
             }
