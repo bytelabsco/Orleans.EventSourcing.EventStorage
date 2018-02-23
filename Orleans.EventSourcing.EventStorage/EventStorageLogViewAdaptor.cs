@@ -5,11 +5,10 @@
     using System.Linq;
     using System.Threading.Tasks;
     using Microsoft.Extensions.Logging;
-    using Orleans;
     using Orleans.EventSourcing.Common;
+    using Orleans.EventSourcing.EventStorage.Grains;
     using Orleans.EventSourcing.EventStorage.States;
     using Orleans.LogConsistency;
-    using Orleans.Runtime;
     using Orleans.Storage;
 
     /// <summary>
@@ -27,12 +26,14 @@
         /// <summary>
         /// Initialize a StorageProviderLogViewAdaptor class
         /// </summary>
-        public EventStorageLogViewAdaptor(ILogViewAdaptorHost<TLogView, TLogEntry> host, TLogView initialState, IStorageProvider globalStorageProvider, string grainTypeName, ILogConsistencyProtocolServices services, EventStorageOptions config)
+        public EventStorageLogViewAdaptor(ILogViewAdaptorHost<TLogView, TLogEntry> host, TLogView initialState, IStorageProvider globalStorageProvider, string grainTypeName, ILogConsistencyProtocolServices services, IGrainFactory grainFactory, EventStorageOptions config)
             : base(host, initialState, services)
         {
             _globalStorageProvider = globalStorageProvider;
             _grainTypeName = grainTypeName;
             _config = config;
+
+            _grainFactory = grainFactory;
         }
 
         private const int maxEntriesInNotifications = 200;
@@ -40,13 +41,14 @@
         private IStorageProvider _globalStorageProvider;
         private string _grainTypeName;
         private EventStorageOptions _config;
+        private IGrainFactory _grainFactory;
 
         // the confirmed view
         private TLogView _view;
-        private int _confirmedVersion;
 
         // Summaries
         private StreamSummary _streamSummary;
+        private IGlobalCommit _globalCommit;
 
         /// <inheritdoc/>
         protected override TLogView LastConfirmedView()
@@ -57,15 +59,13 @@
         /// <inheritdoc/>
         protected override int GetConfirmedVersion()
         {
-            return _confirmedVersion;
+            return _streamSummary.StreamSummaryState.CurrentCommitNumber;
         }
 
         /// <inheritdoc/>
         protected override void InitializeConfirmedView(TLogView initialState)
         {
             _view = initialState;
-            _confirmedVersion = 0;
-
             _streamSummary = new StreamSummary();
         }
 
@@ -134,13 +134,14 @@
         /// <inheritdoc/>
         protected override async Task ReadAsync()
         {
-
             var grainReference = Services.GrainReference;
             var originalGrainId = grainReference.GetGrainId();
 
-            await _globalStorageProvider.ReadStateAsync(nameof(StreamSummary), grainReference, _streamSummary);
-            var streamCommitNumber = _streamSummary.StreamSummaryState.CurrentCommitNumber;
+            var streamSummary = new StreamSummary();
+            await _globalStorageProvider.ReadStateAsync(nameof(StreamSummary), grainReference, streamSummary);
 
+            var streamCommitNumber = streamSummary.StreamSummaryState.CurrentCommitNumber;
+            
             if (_config.TakeSnapshots)
             {
                 try
@@ -151,7 +152,6 @@
                     if(snapshot.StreamSnapshotState.Snapshot != null)
                     {
                         _view = snapshot.StreamSnapshotState.Snapshot;
-                        _confirmedVersion = snapshot.StreamSnapshotState.CommitNumber;
                     }
                 }
                 catch(Exception e)
@@ -160,9 +160,9 @@
                 }
             }
 
-            if(streamCommitNumber > 0 && _confirmedVersion < streamCommitNumber)
+            if(streamCommitNumber > 0 && streamCommitNumber > _streamSummary.StreamSummaryState.CurrentCommitNumber)
             {
-                var startCommit = _confirmedVersion++;
+                var startCommit = _streamSummary.StreamSummaryState.CurrentCommitNumber + 1;
                 var grainKeyString = grainReference.ToKeyString();
 
                 for (var i = startCommit; i <= streamCommitNumber; i++)
@@ -189,79 +189,27 @@
                             ApplyEventToView(@event as TLogEntry);
                         }
                     }
-
-                    _confirmedVersion = i;
                 }
             }
 
             // Set the grainid of the grainReference back to the original
             grainReference.ReplaceGrainId(originalGrainId);
 
-            //// enter_operation("ReadAsync");
-
-            //var grainReference = Services.GrainReference;
-
-            //var baseId = grainReference.ToKeyString();
-
-            //if (_config.TakeSnapshots)
-            //{
-            //    try
-            //    {
-            //        // Look for a snapshot
-            //        var snapshot = _grainFactory.GetGrain<IStreamSnapshot<TLogView>>(baseId);
-            //        var state = await snapshot.GetSnapshot();
-
-            //        if (state.Snapshot != null)
-            //        {
-            //            _view = state.Snapshot;
-            //            _confirmedVersion = state.Version;
-            //        }
-            //    }
-            //    catch (Exception e)
-            //    {
-            //        // Something wrong with the snapshot.   Probably a different version of the state than what was persisted                
-            //    }
-            //}
-
-            //var startVersion = _confirmedVersion + 1;
-
-            //var summary = _grainFactory.GetGrain<IStreamSummary>(baseId);
-            //var currentVersion = await summary.GetCurrentVersion();
-
-            //if (currentVersion > 0)
-            //{
-
-            //    for (var i = startVersion; i <= currentVersion; i++)
-            //    {
-            //        var grainCommit = _grainFactory.GetGrain<IStreamCommit>($"{baseId}{EventStorageConstants.CommitVersionPrefix}{i}");
-            //        var commitNumber = await grainCommit.GetCommitNumber();
-
-            //        var commit = _grainFactory.GetGrain<ICommit>(commitNumber);
-            //        var events = await commit.GetEvents();
-
-            //        if (events != null)
-            //        {
-            //            foreach (var @event in events)
-            //            {
-            //                ApplyEventToView(@event as TLogEntry);
-            //            }
-            //        }
-
-            //        _confirmedVersion = i;
-            //    }
-            //}
-
-            //// exit_operation("ReadAsync");
+            _streamSummary = streamSummary;
         }
 
         /// <inheritdoc/>
         protected override async Task<int> WriteAsync()
         {
+            if (_globalCommit == null)
+            {
+                _globalCommit = _grainFactory.GetGrain<IGlobalCommit>(Guid.Empty);
+            }
+
             var batchSuccessfullyWritten = false;
 
             var updates = GetCurrentBatchOfUpdates();
             var events = updates.Select(u => u.Entry)?.ToList();
-            var eTag = string.Empty;
 
             try
             {
@@ -269,34 +217,31 @@
                 var originalGrainId = grainReference.GetGrainId();
                 var grainKeyString = grainReference.ToKeyString();
 
-                // Read, bump and save the grain stream summary
-                var grainStreamSummary = new StreamSummary();
-                await _globalStorageProvider.ReadStateAsync(nameof(StreamSummary), grainReference, grainStreamSummary);
-                grainStreamSummary.StreamSummaryState.CurrentCommitNumber++;
-                await _globalStorageProvider.WriteStateAsync(nameof(StreamSummary), grainReference, grainStreamSummary);
+                _streamSummary.StreamSummaryState.CurrentCommitNumber++;
+                await _globalStorageProvider.WriteStateAsync(nameof(StreamSummary), grainReference, _streamSummary);
 
                 // Read, bump and save the global summary
-                grainReference.ChangeGrainId(EventStorageConstants.GlobalCommitStreamName);
-                var globalSummary = new StreamSummary();
-                await _globalStorageProvider.ReadStateAsync(nameof(StreamSummary), grainReference, globalSummary);
-                globalSummary.StreamSummaryState.CurrentCommitNumber++;
-                await _globalStorageProvider.WriteStateAsync(nameof(StreamSummary), grainReference, globalSummary);
+                //grainReference.ChangeGrainId(EventStorageConstants.GlobalCommitStreamName);
+                //var globalSummary = new StreamSummary();
+                //await _globalStorageProvider.ReadStateAsync(nameof(StreamSummary), grainReference, globalSummary);
+                //globalSummary.StreamSummaryState.CurrentCommitNumber++;
+                //await _globalStorageProvider.WriteStateAsync(nameof(StreamSummary), grainReference, globalSummary);
+                var globalCommitNumber = await _globalCommit.Bump();
 
                 // Save the commit
                 var commit = new Commit();
-                commit.CommitState.Number = globalSummary.StreamSummaryState.CurrentCommitNumber;
+                commit.CommitState.Number = globalCommitNumber;
                 commit.CommitState.Events = events.Select(s => s as object).ToList();
 
                 grainReference.ChangeGrainId((long)commit.CommitState.Number);
                 await _globalStorageProvider.WriteStateAsync(nameof(Commit), grainReference, commit);
-                eTag = commit.ETag;
 
                 // Save the stream commit
                 var streamCommit = new StreamCommit();
-                streamCommit.StreamCommitState.GlobalCommitNumber = globalSummary.StreamSummaryState.CurrentCommitNumber;
-                streamCommit.StreamCommitState.StreamCommitNumber = grainStreamSummary.StreamSummaryState.CurrentCommitNumber;
+                streamCommit.StreamCommitState.GlobalCommitNumber = globalCommitNumber;
+                streamCommit.StreamCommitState.StreamCommitNumber = _streamSummary.StreamSummaryState.CurrentCommitNumber;
 
-                grainReference.ChangeGrainId($"{grainKeyString}{EventStorageConstants.CommitVersionPrefix}{grainStreamSummary.StreamSummaryState.CurrentCommitNumber}");
+                grainReference.ChangeGrainId($"{grainKeyString}{EventStorageConstants.CommitVersionPrefix}{_streamSummary.StreamSummaryState.CurrentCommitNumber}");
                 await _globalStorageProvider.WriteStateAsync(nameof(StreamCommit), grainReference, streamCommit);
 
                 // Reset the grain reference id
@@ -309,15 +254,13 @@
                     ApplyEventToView(@event);
                 }
 
-                _confirmedVersion = grainStreamSummary.StreamSummaryState.CurrentCommitNumber;
-
                 // Check to see if we need to snapshot
                 if (_config.TakeSnapshots)
                 {
-                    if (_confirmedVersion % _config.CommitsPerSnapshot == 0)
+                    if (_streamSummary.StreamSummaryState.CurrentCommitNumber > 0 &&_streamSummary.StreamSummaryState.CurrentCommitNumber % _config.CommitsPerSnapshot == 0)
                     {
                         var snapshot = new StreamSnapshot<TLogView>();
-                        snapshot.StreamSnapshotState.CommitNumber = _confirmedVersion;
+                        snapshot.StreamSnapshotState.CommitNumber = _streamSummary.StreamSummaryState.CurrentCommitNumber;
                         snapshot.StreamSnapshotState.Snapshot = _view;
 
                         await _globalStorageProvider.WriteStateAsync(nameof(StreamSnapshot<TLogView>), grainReference, snapshot);
@@ -335,10 +278,10 @@
             {
                 BroadcastNotification(new UpdateNotificationMessage()
                 {
-                    Version = _confirmedVersion,
+                    Version = _streamSummary.StreamSummaryState.CurrentCommitNumber,
                     Updates = updates.Select(se => se.Entry).ToList(),
                     Origin = Services.MyClusterId,
-                    ETag = eTag
+                    ETag = _streamSummary.ETag
                 });
             }
 
@@ -351,87 +294,6 @@
             }
 
             return updates.Length;
-
-
-        //    // enter_operation("WriteAsync");
-
-        //    string eTag = string.Empty;
-        //    bool batchsuccessfullywritten = false;
-
-        //    var grainReference = Services.GrainReference;
-
-        //    var updates = GetCurrentBatchOfUpdates();
-        //    var events = updates.Select(u => u.Entry)?.ToList();
-
-        //    // Log the events for the grain, along with it's local (Grain instance specific) and global (all commits ever) numbers
-        //    var baseId = grainReference.ToKeyString();
-
-        //    var globalSummary = _grainFactory.GetGrain<IStreamSummary>(EventStorageConstants.GlobalCommitStreamName);
-        //    var streamSummary = _grainFactory.GetGrain<IStreamSummary>(baseId);
-
-        //    var newGlobalVersion = await globalSummary.BumpVersion();
-        //    var newstreamVersion = await streamSummary.BumpVersion();
-
-        //    var commit = _grainFactory.GetGrain<ICommit>(newGlobalVersion);
-        //    var convertedEvents = events.Select(s => s as object).ToList();
-
-        //    await commit.RecordEvents(convertedEvents);
-
-        //    var grainCommit = _grainFactory.GetGrain<IStreamCommit>($"{baseId}{EventStorageConstants.CommitVersionPrefix}{newstreamVersion}");
-        //    await grainCommit.SetCommitNumber(newGlobalVersion);
-
-        //    foreach (var @event in events)
-        //    {
-        //        ApplyEventToView(@event);
-        //    }
-
-        //    _confirmedVersion = newstreamVersion;
-
-        //    if (_config.TakeSnapshots)
-        //    {
-        //        if (_confirmedVersion % _config.CommitsPerSnapshot == 0)
-        //        {
-        //            // Take state snapshot
-        //            var snapshot = _grainFactory.GetGrain<IStreamSnapshot<TLogView>>(baseId);
-        //            await snapshot.TakeSnapshot(_view, _confirmedVersion);
-        //        }
-        //    }
-
-        //    batchsuccessfullywritten = true;
-
-        //    // broadcast notifications to all other clusters
-        //    if (batchsuccessfullywritten)
-        //    {
-        //        BroadcastNotification(new UpdateNotificationMessage()
-        //        {
-        //            Version = _confirmedVersion,
-        //            Updates = updates.Select(se => se.Entry).ToList(),
-        //            Origin = Services.MyClusterId,
-        //            // ETag = eTag                    
-        //        });
-        //    }
-
-        //    // do post commit, if it's supplied
-        //    if (_config.PostCommit != null)
-        //    {
-        //        try
-        //        {
-        //            await commit.PostCommit(_config.PostCommit);
-        //        }
-        //        catch
-        //        {
-        //            // ignore
-        //        }
-        //}
-
-        //    // exit_operation("WriteAsync");
-
-        //    if (!batchsuccessfullywritten)
-        //    {
-        //        return 0;
-        //    }
-
-        //    return updates.Length;
         }
 
         /// <summary>
@@ -468,7 +330,6 @@
         [Serializable]
         protected class UpdateNotificationMessage : INotificationMessage
         {
-            /// <inheritdoc/>
             public int Version { get; set; }
 
             /// <summary> The cluster that performed the update </summary>
@@ -492,11 +353,7 @@
             var earlier = earlierMessage as UpdateNotificationMessage;
             var later = laterMessage as UpdateNotificationMessage;
 
-            if (earlier != null
-                && later != null
-                && earlier.Origin == later.Origin
-                && earlier.Version + later.Updates.Count == later.Version
-                && earlier.Updates.Count + later.Updates.Count < maxEntriesInNotifications)
+            if (earlier != null && later != null && earlier.Origin == later.Origin && earlier.Version + 1 == later.Version && earlier.Updates.Count + later.Updates.Count < maxEntriesInNotifications)
 
                 return new UpdateNotificationMessage()
                 {
@@ -531,26 +388,27 @@
         {
             var orderedNotifications = notifications.OrderBy(n => n.Key).ToList();
 
-            // discard notifications that are behind our already confirmed state
-            while (orderedNotifications.Count > 0 && orderedNotifications.ElementAt(0).Key < _confirmedVersion)
-            {
-                Services.Log(LogLevel.Information, "discarding notification {0}", notifications.ElementAt(0).Value);
-                notifications.RemoveAt(0);
-            }
-
             // process notifications that reflect next global version
-            while (orderedNotifications.Count > 0)
+            while (orderedNotifications.Count > 0 )
             {
-                var updateNotification = notifications.ElementAt(0).Value;
+                var notificationPair = notifications.ElementAt(0);
                 notifications.RemoveAt(0);
 
+                if(notificationPair.Key < _streamSummary.StreamSummaryState.CurrentCommitNumber)
+                {
+                    continue;
+                }
+
+                var updateNotification = notificationPair.Value;
+                
                 // append all operations in pending 
                 foreach (var u in updateNotification.Updates)
                 {
                     ApplyEventToView(u);
                 }
 
-                _confirmedVersion = updateNotification.Version;
+                _streamSummary.StreamSummaryState.CurrentCommitNumber = updateNotification.Version;
+                _streamSummary.ETag = updateNotification.ETag;
 
                 Services.Log(LogLevel.Information, "notification success ({0} updates)", updateNotification.Updates.Count);
             }
